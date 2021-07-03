@@ -466,9 +466,12 @@ adduser ()
 				  \bPersistentKeepalive = 30\n"
 			echo -e $USER_CONF > $USER_FILE
 			wg set $WG_IF peer $USER_PUB allowed-ips $USER_IP
-			echo "$i Configuration file:"
-			echo
+			echo "$i configuration file:"
 			cat $USER_FILE
+			if which qrencode > /dev/null 2>&1
+			then
+				qrencode -t ansiutf8 < $USER_FILE
+			fi
 			echo
 		fi
 	done
