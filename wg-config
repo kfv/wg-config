@@ -37,6 +37,8 @@ Commands:
     General
 	list            -- List users of the specified interfaces,
 	                   or all if no interface is passed
+	show            -- Show configuration of the specified
+	                   users
 	help            -- Show this text
 
     Users Management
@@ -53,6 +55,7 @@ Examples:
 	wg-config rmif -i wg0
 	wg-config rmuser -i wg0 -u kfv
 	wg-config list -i wg0
+	wg-config show -i wg0 -u kfv
 
 EOF
 	exit 1
@@ -223,6 +226,10 @@ parse_cmd ()
 		shift 1
 		list $@
 		;;
+	show)
+		shift 1
+		show $@
+		;;
 	help | usage | *)
 		usage
 		;;
@@ -331,6 +338,52 @@ list ()
 	fi
 }
 
+# show()
+#
+# Show configuration of the specified users
+show () {
+	while [ $# -gt 0 ]; do
+		case $1 in
+		-i)
+			shift 1
+			WG_IF=$1
+			;;
+		-u)
+			shift 1
+			USER=$1
+			;;
+		esac
+		shift
+	done
+	pre_check
+	if [ -z $WG_IF ] || [ -z $USER ]
+	then
+		error "insufficient arguments"
+	fi
+	USER=`parse_list $USER`
+	for i in $USER; do
+		if [ -e $WG_PBASE/$i.conf ];
+		then
+			echo "$i:"
+			cat $WG_PBASE/$i.conf
+			if which qrencode > /dev/null 2>&1
+			then
+				qrencode -t ansiutf8 < $WG_PBASE/$i.conf
+			fi
+			echo
+		else
+			echo "$i does not exist"
+			echo
+		fi
+	done
+	if ! which qrencode > /dev/null 2>&1
+	then
+		echo "+----------------------------------+"
+		echo "| you may like to install qrencode |"
+		echo "+----------------------------------+"
+	fi
+}
+
 # adduser()
 #
 # Add user on the specified interface.
@@ -357,7 +410,8 @@ adduser ()
 		esac
 		shift
 	done
-	if [ -z $WG_IF ] || [ -z $USER ]
+	pre_check
+	if [ -z $USER ]
 	then
 		error "insufficient arguments"
 	fi
@@ -377,7 +431,6 @@ adduser ()
 	then
 		error "could not find public ip address"
 	fi
-	pre_check
 	USER=`parse_list $USER`
 	for i in $USER; do
 		grep -qsi $i $WG_CONF
@@ -443,7 +496,8 @@ rmuser ()
 		esac
 		shift
 	done
-	if [ -z $WG_IF ] || [ -z $USER ]
+	pre_check
+	if [ -z $USER ]
 	then
 		error "insufficient arguments"
 	fi
