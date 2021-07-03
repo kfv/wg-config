@@ -1,0 +1,489 @@
+#!/bin/sh
+
+#
+# Globals
+#
+WG_BASEDIR="/usr/local/etc/wireguard"
+CONFIGFILE="$WG_BASEDIR/wg-config.conf"
+WG_PEEROOT="$WG_BASEDIR/peers"
+
+progname=${0##*/}
+
+#
+# Functions
+#
+usage ()
+{
+        cat <<EOF
+usage: $progname command [options] ...
+
+Options:
+    General
+	-i interface    -- Set the target interface
+	                   (default: wg0)
+
+    Users Management
+	-u username     -- The username on whom the action applies
+	-d dns          -- Set DNS entries
+	                   (default: 1.0.0.1, 1.1.1.1)
+
+    Interface Management
+	-a address      -- Set interface address
+	-p port         -- Set listen port
+	-P privkey      -- Set private key
+	                   (default: auto generated)
+
+Commands:
+    General
+	list            -- List users of the specified interfaces,
+	                   or all if no interface is passed
+	help            -- Show this text
+
+    Users Management
+	adduser         -- Add new user to the system
+	rmuser          -- Remove user from the system
+
+    Interface Management
+	addif           -- Add new interface to the system
+	rmif            -- Remove interface from the system
+
+Examples:
+	wg-config addif -i wg0 -a 192.168.250.1 -p 51950
+	wg-config adduser -i wg0 -u user1,user2 -d 1.0.0.1,1.1.1.1
+	wg-config rmif -i wg0
+	wg-config rmuser -i wg0 -u kfv
+	wg-config list -i wg0
+
+EOF
+	exit 1
+}
+
+# error $message
+#
+# Print error message and exit.
+#
+error ()
+{
+	echo "$progname: $*" >&2
+	exit 1
+}
+
+# f_ok() $file
+#
+# Exit if file does not exist or it does not have enough
+# permissions.
+#
+f_ok ()
+{
+	if [ ! -f "$1"  ]
+	then
+		echo "$1: file does not exist" >&2
+		exit 1
+	elif [ ! -r "$1"  ] || [ ! -w "$1"  ]
+	then
+		echo "$1: missing permission bits (read/write)" >&2
+		exit 1
+	fi
+}
+
+# parse_list() $list
+#
+# Parse a comma seperated list of values.
+#
+parse_list ()
+{
+	echo $1 | sed 's/,/ /g'
+}
+
+# get_address() $interface
+#
+# Extract the incoming IP address.
+#
+get_address ()
+{
+	ifconfig ${EXT_IF} inet | awk '/inet/ { print $2 }'
+}
+
+# addif()
+#
+# Add WireGuard interface.
+#
+addif ()
+{
+	while [ $# -gt 0 ]; do
+		case $1 in
+		-i)
+			shift 1
+			WG_IF=$1
+			;;
+		-a)
+			shift 1
+			WG_ADDR=$1
+			;;
+		-p)
+			shift 1
+			WG_PORT=$1
+			;;
+		-P)
+			shift 1
+			WG_PRIV=$1
+			;;
+		*)
+			error "addif -i wg0 -a addr -p port [-P privkey]"
+			;;
+		esac
+		shift
+	done
+	if [ -z $WG_IF ] || [ -z $WG_ADDR ] || [ -z $WG_PORT ]
+	then
+		error "insufficient arguments"
+	fi
+	WG_IF=`parse_list $WG_IF`
+	VALNUM=`echo $WG_IF | wc -w`
+	if [ $VALNUM -gt 1 ]
+	then
+		error "addif: only one interface at a time"
+	fi
+	WG_ADDR=`echo $WG_ADDR | sed 's/\/*//g'`
+	WG_ADDR="${WG_ADDR%.*}.1"
+	WG_PRIV=`/usr/local/bin/wg genkey`
+	WG_PUB=`echo -n $WG_PRIV | /usr/local/bin/wg pubkey`
+	WG_CONF="[Interface]\n
+		\bAddress = $WG_ADDR/24\n
+		\bPrivateKey = $WG_PRIV\n
+		\bListenPort = $WG_PORT\n"
+	WG_FILE="$WG_BASEDIR/$WG_IF.conf"
+	echo -e $WG_CONF > $WG_FILE
+	sysrc wireguard_interfaces+="$WG_IF"
+	wg-quick up $WG_IF
+}
+
+# rmif()
+#
+# Disable WireGuard interface and remove its contents.
+#
+rmif ()
+{
+	while [ $# -gt 0 ]; do
+		case $1 in
+		-i)
+			shift 1
+			WG_IF=$1
+			;;
+		*)
+			error "list -i wg0,wg1,..."
+			;;
+		esac
+		shift
+	done
+	WG_IF=`parse_list $WG_IF`
+	for i in $WG_IF; do
+		WG_FILE="$WG_BASEDIR/$i.conf"
+		WG_PBASE="$WG_PEEROOT/$i"
+		if [ -f $WG_FILE ]
+		then
+			wg-quick down $i
+			sysrc wireguard_interfaces-="$i"
+			rm $WG_FILE
+			if [ -d $WG_PBASE ]
+			then
+			        rm -r $WG_PBASE
+			fi
+			echo
+		else
+			echo "$i does not exist"
+		fi
+	done
+}
+
+# parse_cmd()
+#
+# Parse command line arguments.
+#
+parse_cmd ()
+{
+	case "$1" in
+	adduser)
+		shift 1
+		adduser $@
+		;;
+	rmuser)
+		shift 1
+		rmuser $@
+		;;
+	addif)
+		shift 1
+		addif $@
+		;;
+	rmif)
+		shift 1
+		rmif $@
+		;;
+	list)
+		shift 1
+		list $@
+		;;
+	help | usage | *)
+		usage
+		;;
+	esac
+}
+
+# parse_config()
+#
+# Parse WireGuard configuration file.
+#
+parse_config ()
+{
+	WG_PORT=`awk '/ListenPort/ { print $3 }' $WG_CONF`
+	ADDRESS=`awk -F'= |=' '/Address/ { print $2 }' $WG_CONF`
+	R_BEGIN=`echo $ADDRESS | awk -F'.' '{ print $1,$2,$3"." }' OFS='.'`
+	LAST_IP=`awk '/AllowedIPs/ { print $3 }' $WG_CONF | tail -1 |
+		 awk -F'/' '{ print $1 }'`
+	LAST_HOST=`echo $LAST_IP | awk -F'.' '{ print $4 }'`
+	if [ -z $LAST_HOST ]
+	then
+		NEW_HOST=2
+	else
+		NEW_HOST=`expr $LAST_HOST + 1`
+	fi
+	if [ $NEW_HOST -gt 255  ]
+	then
+		error "Host address exceeded 255"
+	fi
+}
+
+# pre_check()
+#
+# Check if WireGuard configuration file exists and is accessible.
+# If it exists, calculate and set public key of the interface,
+# and take care of the peers' directory.
+#
+pre_check ()
+{
+	: ${WG_IF=wg0}
+	: ${WG_CONF="$WG_BASEDIR/$WG_IF.conf"}
+	f_ok $WG_CONF
+	WG_PUB=`awk '/PrivateKey/ { print $3 }' $WG_CONF | wg pubkey`
+	
+	WG_PBASE="$WG_PEEROOT/$WG_IF"
+	if [ ! -d $WG_PEEROOT ]
+	then
+		mkdir $WG_PEEROOT
+	fi
+	if [ ! -d $WG_PBASE ]
+	then
+		echo "Creating $WG_PBASE"
+		mkdir $WG_PBASE
+	fi
+}
+
+# load_conf()
+#
+# Load configuration file to get AllowedIPs and DNS entries.
+# You can add more lines to get further variables.
+#
+load_conf ()
+{
+	if [ -f $CONFIGFILE ]
+	then
+		IN_ADDR=`awk -F'= |=' '/InAddress/ { print $2 }' < $CONFIGFILE`
+		DNS=`awk -F'= |=' '/DNS/ { print $2 }' < $CONFIGFILE`
+		AIP=`awk -F'= |=' '/AllowedIPs/ { print $2 }' < $CONFIGFILE`
+	fi
+}
+
+# list() [$interface]
+#
+# List members of the specified interface, or all interfaces if no argument
+# is provided.
+#
+list ()
+{
+	while [ $# -gt 0 ]; do
+		case $1 in
+		-i)
+			shift 1
+			WG_IF=$1
+			;;
+		*)
+			error "list -i wg0,wg1,..."
+			;;
+		esac
+		shift
+	done
+	if [ -z $WG_IF ]
+	then
+		WG_IF=`wg | awk '/interface/ { print $2 }'`
+		for i in $WG_IF; do
+			echo "$i:"
+			WG_PBASE="$WG_PEEROOT/$i"
+			ls $WG_PBASE | awk -F'.conf' '{ print $1 }'
+			echo
+		done
+	else
+		for i in $WG_IF; do
+			echo "$i:"
+			WG_PBASE="$WG_PEEROOT/$i"
+			ls $WG_PBASE | awk -F'.conf' '{ print $1 }'
+			echo
+		done
+	fi
+}
+
+# adduser()
+#
+# Add user on the specified interface.
+#
+adduser ()
+{
+	while [ $# -gt 0 ]; do
+		case $1 in
+		-i)
+			shift 1
+			WG_IF=$1
+			;;
+		-u)
+			shift 1
+			USER=$1
+			;;
+		-d)
+			shift 1
+			DNS=$1
+			;;
+		*)
+			error "adduser -i wg0 -u user1,user2,... -d dns1,..."
+			;;
+		esac
+		shift
+	done
+	if [ -z $WG_IF ] || [ -z $USER ]
+	then
+		error "insufficient arguments"
+	fi
+	WG_IF=`parse_list $WG_IF`
+	VALNUM=`echo $WG_IF | wc -w`
+	if [ $VALNUM -gt 1 ]
+	then
+		error "adduser: only one interface at a time"
+	fi
+	load_conf
+	if [ -z $IN_ADDR ]
+	then
+		read -p "Enter public interface [em0]: " EXT_IF
+		IN_ADDR=`get_address`
+	fi
+	if [ -z $IN_ADDR ]
+	then
+		error "could not find public ip address"
+	fi
+	pre_check
+	USER=`parse_list $USER`
+	for i in $USER; do
+		grep -qsi $i $WG_CONF
+		if [ $? -eq 0 ]
+		then
+			echo "$i already exists"
+                else
+			parse_config
+			WG_ENDPOINT="$IN_ADDR:$WG_PORT"
+			USER_IP="$R_BEGIN$NEW_HOST"
+			USER_FILE="$WG_PBASE/$i.conf"
+			USER_PRIV=`/usr/local/bin/wg genkey`
+			USER_PUB=`echo -n $USER_PRIV | /usr/local/bin/wg pubkey`
+			if [ $? -gt 1  ]
+			then
+				error "something went wrong ..."
+			fi
+			APPEND_CONF="# BEGIN $i\n
+				    \b[Peer]\n
+				    \bPublicKey = $USER_PUB\n
+				    \bAllowedIPs = $USER_IP\n
+				    \b# END $i"
+			echo -e $APPEND_CONF >> $WG_CONF
+			USER_CONF="[Interface]\n
+				  \bPrivateKey = $USER_PRIV\n
+				  \bAddress = $USER_IP/32\n
+				  \bDNS = ${DNS:-1.0.0.1, 1.1.1.1}\n
+				  \bMTU = 1412\n
+				  \b[Peer]\n
+				  \bPublicKey = $WG_PUB\n
+				  \bAllowedIPs = ${AIP:-0.0.0.0/0}\n
+				  \bEndpoint = $WG_ENDPOINT\n
+				  \bPersistentKeepalive = 30\n"
+			echo -e $USER_CONF > $USER_FILE
+			wg set $WG_IF peer $USER_PUB allowed-ips $USER_IP
+			echo "$i Configuration file:"
+			echo
+			cat $USER_FILE
+			echo
+		fi
+	done
+}
+
+# rmuser()
+#
+# Remove user from the specified interface.
+#
+rmuser ()
+{
+	while [ $# -gt 0 ]; do
+		case $1 in
+		-i)
+			shift 1
+			WG_IF=$1
+			;;
+		-u)
+			shift 1
+			USER=$1
+			;;
+		*)
+			error "rmuser -i wg0 -u user1,user2,..."
+			;;
+		esac
+		shift
+	done
+	if [ -z $WG_IF ] || [ -z $USER ]
+	then
+		error "insufficient arguments"
+	fi
+	WG_IF=`parse_list $WG_IF`
+	VALNUM=`echo $WG_IF | wc -w`
+	if [ $VALNUM -gt 1 ]
+	then
+		error "rmuser: only one interface at a time"
+	fi
+	pre_check
+	parse_config
+	USER=`parse_list $USER`
+	for i in $USER; do
+		grep -qsi $i $WG_CONF
+		if [ $? -eq 0 ]
+		then
+			USER_FILE="$WG_PBASE/$i.conf"
+			USER_PRIV=`awk '/PrivateKey/ { print $3 }' $USER_FILE`
+			USER_PUB=`echo -n $USER_PRIV | /usr/local/bin/wg pubkey`
+			rm $USER_FILE
+			wg set $WG_IF peer $USER_PUB remove
+			sed -I ".bak" "/BEGIN $i/,/END $i/d" $WG_CONF
+			echo "removed $i from $WG_CONF"
+		else
+			echo "$i does not exist"
+		fi
+	done
+}
+
+#
+# Main program
+#
+main ()
+{
+	if [ $# -eq 0 ]
+	then
+		usage
+	else
+		parse_cmd "$@"
+	fi
+}
+
+main "$@"
