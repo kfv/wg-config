@@ -1,0 +1,11 @@
+# Incoming Address
+# Prompts for interface if not set
+InAddress = 192.0.2.250
+
+# AllowedIPs
+# Defaults to 0.0.0.0/0
+AllowedIPs = 198.51.100.0/24, 203.0.113.0/24
+
+# Name Servers
+# Defaults to 1.1.1.1, 1.0.0.1
+DNS = 1.1.1.1, 1.0.0.1
